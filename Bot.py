@@ -7,22 +7,14 @@ from database import (
     initialize_database,
     get_or_create_user,
     create_watch,
-    get_watch_for_user,
-    get_price_history_for_user,
     get_watches_for_user,
     delete_watch,
 )
 
-from retailers.flipkart import (
-    get_product,
-    FlipkartBlockedError,
-    FlipkartProductNotFoundError,
-    FlipkartScraperError,
-)
+from retailers import get_retailer
 
 from retry import scrape_with_retry
 from logger import get_logger
-from checker import check_watch
 
 
 # ==================================================
@@ -42,17 +34,6 @@ BASE_URL = f"https://api.telegram.org/bot{BOT_TOKEN}"
 # CONVERSATION STATE
 # ==================================================
 
-# Temporary state for users currently going through
-# the conversational /add flow.
-#
-# Example:
-#
-# pending_adds[123456] = {
-#     "url": "...",
-#     "product": {...}
-# }
-#
-# This deliberately lives in memory for now.
 pending_adds = {}
 
 
@@ -61,6 +42,7 @@ pending_adds = {}
 # ==================================================
 
 def send_message(chat_id, text):
+
     response = requests.post(
         f"{BASE_URL}/sendMessage",
         data={
@@ -76,6 +58,7 @@ def send_message(chat_id, text):
 
 
 def get_updates(offset=None):
+
     response = requests.get(
         f"{BASE_URL}/getUpdates",
         params={
@@ -95,6 +78,7 @@ def get_updates(offset=None):
 # ==================================================
 
 def send_help(chat_id):
+
     send_message(
         chat_id,
         "🦅 Price Hawk\n\n"
@@ -111,12 +95,6 @@ def send_help(chat_id):
 
         "/watches\n"
         "Show your watches.\n\n"
-
-        "/history <watch ID>\n"
-        "Show price history.\n\n"
-
-        "/price <watch ID>\n"
-        "Check the latest price right now.\n\n"
 
         "/remove <watch ID>\n"
         "Remove one of your watches.\n\n"
@@ -135,15 +113,22 @@ def send_help(chat_id):
 
 def scrape_product(url):
 
-    if "flipkart.com" not in url.lower():
+    retailer = get_retailer(url)
+
+    if retailer is None:
 
         raise ValueError(
             "Unsupported retailer"
         )
 
     return scrape_with_retry(
-        get_product,
+        retailer.get_product,
         url,
+        blocked_error=retailer.blocked_error,
+        product_not_found_error=(
+            retailer.product_not_found_error
+        ),
+        scraper_error=retailer.scraper_error,
     )
 
 
@@ -153,13 +138,15 @@ def scrape_product(url):
 
 def create_user_watch(
     user_id,
+    retailer_name,
     url,
     target_price,
     product,
 ):
+
     return create_watch(
         user_id=user_id,
-        retailer="flipkart",
+        retailer=retailer_name,
         url=url,
         target_price=target_price,
         product_name=product["name"],
@@ -175,6 +162,7 @@ def send_watch_created(
     product,
     target_price,
 ):
+
     product_name = product["name"]
     current_price = product["price"]
     available = product["available"]
@@ -200,6 +188,143 @@ def send_watch_created(
 
 
 # ==================================================
+# CHECK AND CREATE WATCH
+# ==================================================
+
+def check_and_create_watch(
+    chat_id,
+    user_id,
+    url,
+    target_price,
+):
+
+    retailer = get_retailer(url)
+
+    if retailer is None:
+
+        send_message(
+            chat_id,
+            "❌ I don't support that retailer yet."
+        )
+
+        return
+
+    send_message(
+        chat_id,
+        "🔎 Checking the product..."
+    )
+
+    try:
+
+        product = scrape_product(url)
+
+    except retailer.blocked_error as error:
+
+        logger.warning(
+            f"User #{user_id}: "
+            f"{retailer.name} blocked request: "
+            f"{error}"
+        )
+
+        send_message(
+            chat_id,
+            f"⚠️ {retailer.name} blocked the request.\n\n"
+            "Try again later."
+        )
+
+        return
+
+    except retailer.product_not_found_error as error:
+
+        logger.warning(
+            f"User #{user_id}: "
+            f"{retailer.name} product data not found: "
+            f"{error}"
+        )
+
+        send_message(
+            chat_id,
+            "❌ I couldn't find product information "
+            "on that page.\n\n"
+            "Check the URL and try again."
+        )
+
+        return
+
+    except retailer.scraper_error as error:
+
+        logger.warning(
+            f"User #{user_id}: "
+            f"{retailer.name} scraper failure: "
+            f"{error}"
+        )
+
+        send_message(
+            chat_id,
+            f"⚠️ I couldn't retrieve that "
+            f"{retailer.name} product right now.\n\n"
+            "Try again later."
+        )
+
+        return
+
+    except ValueError as error:
+
+        logger.warning(
+            f"User #{user_id}: "
+            f"{error}"
+        )
+
+        send_message(
+            chat_id,
+            "❌ I don't recognize that retailer."
+        )
+
+        return
+
+    except Exception as error:
+
+        logger.exception(
+            f"User #{user_id}: "
+            f"unexpected scraping error"
+        )
+
+        send_message(
+            chat_id,
+            "❌ I couldn't retrieve that product page.\n\n"
+            "Please check the URL and try again."
+        )
+
+        return
+
+    if product is None:
+
+        send_message(
+            chat_id,
+            "❌ I couldn't find product information "
+            "on that page.\n\n"
+            "The page may be temporarily unavailable."
+        )
+
+        return
+
+    watch_id = create_user_watch(
+        user_id=user_id,
+        retailer_name=retailer.name,
+        url=url,
+        target_price=target_price,
+        product=product,
+    )
+
+    send_watch_created(
+        chat_id=chat_id,
+        watch_id=watch_id,
+        product=product,
+        target_price=target_price,
+    )
+
+
+# ==================================================
 # DIRECT WATCH COMMAND
 # ==================================================
 
@@ -208,6 +333,7 @@ def handle_direct_watch(
     user_id,
     text,
 ):
+
     parts = text.split(maxsplit=2)
 
     if len(parts) != 3:
@@ -254,15 +380,16 @@ def handle_direct_watch(
         return
 
     # --------------------------------------------------
-    # URL
+    # RETAILER
     # --------------------------------------------------
 
-    if "flipkart.com" not in url.lower():
+    retailer = get_retailer(url)
+
+    if retailer is None:
 
         send_message(
             chat_id,
-            "❌ I don't support that retailer yet.\n\n"
-            "Currently supported: Flipkart."
+            "❌ I don't support that retailer yet."
         )
 
         return
@@ -297,15 +424,17 @@ def handle_add_url(
     user_id,
     text,
 ):
+
     url = text.strip()
 
-    if "flipkart.com" not in url.lower():
+    retailer = get_retailer(url)
+
+    if retailer is None:
 
         send_message(
             chat_id,
             "❌ I don't support that retailer yet.\n\n"
-            "Currently supported: Flipkart.\n\n"
-            "Send a Flipkart product URL."
+            "Please send a supported product URL."
         )
 
         return
@@ -319,17 +448,17 @@ def handle_add_url(
 
         product = scrape_product(url)
 
-    except FlipkartBlockedError as error:
+    except retailer.blocked_error as error:
 
         logger.warning(
             f"User #{user_id}: "
-            f"Flipkart blocked request: "
+            f"{retailer.name} blocked request: "
             f"{error}"
         )
 
         send_message(
             chat_id,
-            "⚠️ Flipkart blocked the request.\n\n"
+            f"⚠️ {retailer.name} blocked the request.\n\n"
             "Try again later."
         )
 
@@ -337,11 +466,11 @@ def handle_add_url(
 
         return
 
-    except FlipkartProductNotFoundError as error:
+    except retailer.product_not_found_error as error:
 
         logger.warning(
             f"User #{user_id}: "
-            f"product data not found: "
+            f"{retailer.name} product data not found: "
             f"{error}"
         )
 
@@ -356,25 +485,26 @@ def handle_add_url(
 
         return
 
-    except FlipkartScraperError as error:
+    except retailer.scraper_error as error:
 
         logger.warning(
             f"User #{user_id}: "
-            f"scraper failure: "
+            f"{retailer.name} scraper failure: "
             f"{error}"
         )
 
         send_message(
             chat_id,
-            "❌ I couldn't retrieve that product.\n\n"
-            "Please try again later."
+            f"⚠️ I couldn't retrieve that "
+            f"{retailer.name} product right now.\n\n"
+            "Try again later."
         )
 
         pending_adds.pop(chat_id, None)
 
         return
 
-    except Exception:
+    except Exception as error:
 
         logger.exception(
             f"User #{user_id}: "
@@ -383,8 +513,8 @@ def handle_add_url(
 
         send_message(
             chat_id,
-            "❌ Something went wrong while "
-            "checking that product."
+            "❌ I couldn't retrieve that product page.\n\n"
+            "Please check the URL and try again."
         )
 
         pending_adds.pop(chat_id, None)
@@ -396,7 +526,8 @@ def handle_add_url(
         send_message(
             chat_id,
             "❌ I couldn't find product information "
-            "on that page."
+            "on that page.\n\n"
+            "The page may be temporarily unavailable."
         )
 
         pending_adds.pop(chat_id, None)
@@ -406,14 +537,18 @@ def handle_add_url(
     pending_adds[chat_id] = {
         "stage": "target",
         "url": url,
+        "retailer": retailer,
         "product": product,
     }
 
+    product_name = product["name"]
+    current_price = product["price"]
+
     send_message(
         chat_id,
-        f"📦 {product['name']}\n\n"
+        f"📦 {product_name}\n"
         f"💰 Current price: "
-        f"₹{product['price']:,.0f}\n\n"
+        f"₹{current_price:,.0f}\n\n"
         f"🎯 What price should I alert you at?"
     )
 
@@ -423,19 +558,22 @@ def handle_add_target(
     user_id,
     text,
 ):
-    target_text = text.strip()
+
+    state = pending_adds.get(chat_id)
+
+    if state is None:
+        return
 
     try:
 
-        target_price = float(target_text)
+        target_price = float(text.strip())
 
     except ValueError:
 
         send_message(
             chat_id,
-            "❌ Please enter a number.\n\n"
-            "For example:\n"
-            "5000"
+            "❌ Target price must be a number.\n\n"
+            "Example: 5000"
         )
 
         return
@@ -449,53 +587,20 @@ def handle_add_target(
 
         return
 
-    pending = pending_adds.get(chat_id)
+    retailer = state["retailer"]
+    url = state["url"]
+    product = state["product"]
 
-    if not pending:
-
-        send_message(
-            chat_id,
-            "❌ There's no product waiting for "
-            "a target price.\n\n"
-            "Use /add to start again."
-        )
-
-        return
-
-    url = pending["url"]
-    product = pending["product"]
-
-    try:
-
-        watch_id = create_user_watch(
-            user_id=user_id,
-            url=url,
-            target_price=target_price,
-            product=product,
-        )
-
-    except Exception:
-
-        logger.exception(
-            f"Failed to create watch for "
-            f"user #{user_id}"
-        )
-
-        send_message(
-            chat_id,
-            "❌ I couldn't create that watch.\n\n"
-            "Nothing was added. Please try again."
-        )
-
-        return
+    watch_id = create_user_watch(
+        user_id=user_id,
+        retailer_name=retailer.name,
+        url=url,
+        target_price=target_price,
+        product=product,
+    )
 
     pending_adds.pop(chat_id, None)
 
-    logger.info(
-        f"Watch #{watch_id} created for "
-        f"user #{user_id}"
-    )
-
     send_watch_created(
         chat_id=chat_id,
         watch_id=watch_id,
@@ -505,138 +610,13 @@ def handle_add_target(
 
 
 # ==================================================
-# SHARED PRODUCT CHECK + CREATE
+# WATCH LIST
 # ==================================================
 
-def check_and_create_watch(
+def handle_watches(
     chat_id,
     user_id,
-    url,
-    target_price,
 ):
-    send_message(
-        chat_id,
-        "🔎 Checking the product..."
-    )
-
-    try:
-
-        product = scrape_product(url)
-
-    except FlipkartBlockedError as error:
-
-        logger.warning(
-            f"User #{user_id}: "
-            f"Flipkart blocked request: "
-            f"{error}"
-        )
-
-        send_message(
-            chat_id,
-            "⚠️ Flipkart blocked the request.\n\n"
-            "Try again later."
-        )
-
-        return
-
-    except FlipkartProductNotFoundError as error:
-
-        logger.warning(
-            f"User #{user_id}: "
-            f"product data not found: "
-            f"{error}"
-        )
-
-        send_message(
-            chat_id,
-            "❌ I couldn't find product information "
-            "on that page."
-        )
-
-        return
-
-    except FlipkartScraperError as error:
-
-        logger.warning(
-            f"User #{user_id}: "
-            f"scraper failure: "
-            f"{error}"
-        )
-
-        send_message(
-            chat_id,
-            "❌ I couldn't retrieve that product.\n\n"
-            "Please try again later."
-        )
-
-        return
-
-    except Exception:
-
-        logger.exception(
-            f"User #{user_id}: "
-            f"unexpected scraping error"
-        )
-
-        send_message(
-            chat_id,
-            "❌ Something went wrong while "
-            "checking that product."
-        )
-
-        return
-
-    if product is None:
-
-        send_message(
-            chat_id,
-            "❌ I couldn't find product information "
-            "on that page."
-        )
-
-        return
-
-    try:
-
-        watch_id = create_user_watch(
-            user_id=user_id,
-            url=url,
-            target_price=target_price,
-            product=product,
-        )
-
-    except Exception:
-
-        logger.exception(
-            f"Failed to create watch for "
-            f"user #{user_id}"
-        )
-
-        send_message(
-            chat_id,
-            "❌ I couldn't create that watch."
-        )
-
-        return
-
-    logger.info(
-        f"Watch #{watch_id} created for "
-        f"user #{user_id}"
-    )
-
-    send_watch_created(
-        chat_id=chat_id,
-        watch_id=watch_id,
-        product=product,
-        target_price=target_price,
-    )
-
-
-# ==================================================
-# LIST / WATCHES
-# ==================================================
-
-def handle_list(chat_id, user_id):
 
     watches = get_watches_for_user(user_id)
 
@@ -645,7 +625,8 @@ def handle_list(chat_id, user_id):
         send_message(
             chat_id,
             "🦅 You aren't watching anything yet.\n\n"
-            "Use /add to start watching a product."
+            "Use /add <URL> <target price> "
+            "to add a product."
         )
 
         return
@@ -669,23 +650,19 @@ def handle_list(chat_id, user_id):
             last_checked,
         ) = watch
 
-        current_text = (
-            f"₹{current_price:,.0f}"
-            if current_price is not None
-            else "Unknown"
-        )
+        if current_price is not None:
 
-        if available is True or available == 1:
-
-            availability_text = "In stock"
-
-        elif available is False or available == 0:
-
-            availability_text = "Unavailable"
+            current_text = (
+                f"₹{current_price:,.0f}"
+            )
 
         else:
 
-            availability_text = "Unknown"
+            current_text = "Unknown"
+
+        target_text = (
+            f"₹{target_price:,.0f}"
+        )
 
         status = (
             "🟢 Watching"
@@ -695,10 +672,10 @@ def handle_list(chat_id, user_id):
 
         lines.append(
             f"#{watch_id} {product_name}\n"
-            f"   💰 Current: {current_text}\n"
-            f"   🎯 Target:  ₹{target_price:,.0f}\n"
-            f"   📦 Stock:   {availability_text}\n"
-            f"   Status:     {status}\n"
+            f"   Retailer: {retailer}\n"
+            f"   Current: {current_text}\n"
+            f"   Target:  {target_text}\n"
+            f"   Status:  {status}\n"
         )
 
     send_message(
@@ -706,437 +683,6 @@ def handle_list(chat_id, user_id):
         "\n".join(lines)
     )
 
-def format_duration(started_at, ended_at):
-    from datetime import datetime
-
-    start = datetime.fromisoformat(
-        started_at.replace("Z", "+00:00")
-    )
-
-    if ended_at is None:
-        return "currently"
-
-    end = datetime.fromisoformat(
-        ended_at.replace("Z", "+00:00")
-    )
-
-    seconds = int(
-        (end - start).total_seconds()
-    )
-
-    if seconds < 60:
-        return f"{seconds}s"
-
-    minutes = seconds // 60
-
-    if minutes < 60:
-        return f"{minutes}m"
-
-    hours = minutes // 60
-    remaining_minutes = minutes % 60
-
-    if remaining_minutes == 0:
-        return f"{hours}h"
-
-    return f"{hours}h {remaining_minutes}m"
-
-
-def handle_history(
-    chat_id,
-    user_id,
-    text,
-):
-    parts = text.split(maxsplit=1)
-
-    if len(parts) != 2:
-
-        send_message(
-            chat_id,
-            "Usage:\n"
-            "/history <watch ID>\n\n"
-            "Example:\n"
-            "/history 2"
-        )
-
-        return
-
-    try:
-
-        watch_id = int(parts[1])
-
-    except ValueError:
-
-        send_message(
-            chat_id,
-            "❌ Watch ID must be a number."
-        )
-
-        return
-
-    # --------------------------------------------------
-    # VERIFY OWNERSHIP
-    # --------------------------------------------------
-
-    watch = get_watch_for_user(
-        user_id=user_id,
-        watch_id=watch_id,
-    )
-
-    if watch is None:
-
-        send_message(
-            chat_id,
-            f"❌ I couldn't find watch #{watch_id} "
-            f"in your watchlist."
-        )
-
-        return
-
-    (
-        _watch_id,
-        retailer,
-        url,
-        product_name,
-        target_price,
-        current_price,
-        currency,
-        available,
-        alert_active,
-        last_checked,
-    ) = watch
-
-    # --------------------------------------------------
-    # FETCH HISTORY
-    # --------------------------------------------------
-
-    history = get_price_history_for_user(
-        user_id=user_id,
-        watch_id=watch_id,
-        limit=50,
-    )
-
-    if not history:
-
-        send_message(
-            chat_id,
-            f"📈 No price history exists yet for "
-            f"watch #{watch_id}."
-        )
-
-        return
-
-    # --------------------------------------------------
-    # CALCULATE STATS
-    # --------------------------------------------------
-
-    prices = [
-        row[1]
-        for row in history
-    ]
-
-    lowest_price = min(prices)
-    highest_price = max(prices)
-
-    # --------------------------------------------------
-    # BUILD MESSAGE
-    # --------------------------------------------------
-
-    lines = [
-        "🦅 PRICE HISTORY",
-        "",
-        f"📦 {product_name}",
-        "",
-        f"💰 Current: "
-        f"₹{current_price:,.0f}"
-        if current_price is not None
-        else "💰 Current: Unknown",
-        f"🎯 Target: "
-        f"₹{target_price:,.0f}",
-        "",
-        "━━━━━━━━━━━━━━━━",
-    ]
-
-    # History is newest first.
-    # Display oldest first because that's much easier
-    # for humans to read.
-    for (
-        interval_id,
-        price,
-        started_at,
-        ended_at,
-    ) in reversed(history):
-
-        duration = format_duration(
-            started_at,
-            ended_at,
-        )
-
-        lines.append(
-            f"₹{price:,.0f}  •  {duration}"
-        )
-
-    lines.extend([
-        "━━━━━━━━━━━━━━━━",
-        "",
-        f"📉 Lowest:  ₹{lowest_price:,.0f}",
-        f"📈 Highest: ₹{highest_price:,.0f}",
-    ])
-
-    send_message(
-        chat_id,
-        "\n".join(lines)
-    )
-
-# ==================================================
-# MANUAL PRICE CHECK
-# ==================================================
-
-def handle_price(
-    chat_id,
-    user_id,
-    text,
-):
-    parts = text.split(maxsplit=1)
-
-    if len(parts) != 2:
-        send_message(
-            chat_id,
-            "Usage:\n"
-            "/price <watch ID>\n\n"
-            "Example:\n"
-            "/price 2"
-        )
-
-        return
-
-    try:
-        watch_id = int(parts[1])
-
-    except ValueError:
-        send_message(
-            chat_id,
-            "❌ Watch ID must be a number."
-        )
-
-        return
-
-    # --------------------------------------------------
-    # VERIFY OWNERSHIP
-    # --------------------------------------------------
-
-    watch = get_watch_for_user(
-        user_id=user_id,
-        watch_id=watch_id,
-    )
-
-    if watch is None:
-        send_message(
-            chat_id,
-            f"❌ I couldn't find watch #{watch_id} "
-            f"in your watchlist."
-        )
-
-        return
-
-    (
-        _watch_id,
-        retailer,
-        url,
-        product_name,
-        target_price,
-        current_price,
-        currency,
-        available,
-        alert_active,
-        last_checked,
-    ) = watch
-
-    # --------------------------------------------------
-    # START CHECK
-    # --------------------------------------------------
-
-    send_message(
-        chat_id,
-        "🔎 Checking the latest price..."
-    )
-
-    logger.info(
-        f"User #{user_id} requested manual "
-        f"price check for watch #{watch_id}"
-    )
-
-    # --------------------------------------------------
-    # RUN SHARED CHECKER
-    # --------------------------------------------------
-
-    try:    
-        
-
-        (
-            watch_id,
-            retailer,
-            url,
-            product_name,
-            target_price,
-            current_price,
-            currency,
-            available,
-            alert_active,
-            last_checked,
-        ) = watch
-
-        watch_for_checker = (
-            watch_id,
-            user_id,
-            retailer,
-            url,
-            None,
-            product_name,
-            target_price,
-            current_price,
-            currency,
-            available,
-            alert_active,
-            last_checked,
-        )
-
-        result = check_watch(watch_for_checker)
-
-    except Exception:
-
-        logger.exception(
-            f"Manual price check failed for "
-            f"watch #{watch_id}"
-        )
-
-        send_message(
-            chat_id,
-            "❌ Something went wrong while "
-            "checking that product."
-        )
-
-        return
-
-    except Exception:
-
-        logger.exception(
-            f"Manual price check failed for "
-            f"watch #{watch_id}"
-        )
-
-        send_message(
-            chat_id,
-            "❌ Something went wrong while "
-            "checking that product."
-        )
-
-        return
-
-    # --------------------------------------------------
-    # HANDLE FAILURE
-    # --------------------------------------------------
-
-    if not result["success"]:
-
-        error_type = result["error"]
-
-        if error_type == "blocked":
-
-            message = (
-                "⚠️ Flipkart blocked the request.\n\n"
-                "Try again later."
-            )
-
-        elif error_type == "product_not_found":
-
-            message = (
-                "❌ I couldn't find product "
-                "information on that page."
-            )
-
-        elif error_type in (
-            "scraper_error",
-            "no_product",
-        ):
-
-            message = (
-                "❌ I couldn't retrieve the "
-                "latest price.\n\n"
-                "Please try again later."
-            )
-
-        else:
-
-            message = (
-                "❌ I couldn't complete the "
-                "price check.\n\n"
-                "Please try again later."
-            )
-
-        send_message(
-            chat_id,
-            message
-        )
-
-        return
-
-    # --------------------------------------------------
-    # SUCCESS
-    # --------------------------------------------------
-
-    new_price = result["price"]
-    new_currency = result["currency"]
-    new_available = result["available"]
-    previous_price = result["previous_price"]
-
-    if previous_price is None:
-
-        price_change_text = (
-            "📊 First recorded price"
-        )
-
-    elif new_price < previous_price:
-
-        price_change_text = (
-            f"📉 Down from "
-            f"₹{previous_price:,.0f}"
-        )
-
-    elif new_price > previous_price:
-
-        price_change_text = (
-            f"📈 Up from "
-            f"₹{previous_price:,.0f}"
-        )
-
-    else:
-
-        price_change_text = (
-            "➡️ Price unchanged"
-        )
-
-    availability_text = (
-        "In stock"
-        if new_available
-        else "Currently unavailable"
-    )
-
-    target_status = (
-        "🎯 AT OR BELOW TARGET"
-        if new_price <= target_price
-        else "🎯 Above target"
-    )
-
-    send_message(
-        chat_id,
-        f"🦅 LATEST PRICE\n\n"
-        f"📦 {product_name}\n\n"
-        f"💰 Current: ₹{new_price:,.0f}\n"
-        f"{price_change_text}\n"
-        f"{target_status}\n"
-        f"📦 Availability: {availability_text}\n\n"
-        f"Your target: ₹{target_price:,.0f}"
-    )
 
 # ==================================================
 # REMOVE
@@ -1147,6 +693,7 @@ def handle_remove(
     user_id,
     text,
 ):
+
     parts = text.split(maxsplit=1)
 
     if len(parts) != 2:
@@ -1169,7 +716,8 @@ def handle_remove(
 
         send_message(
             chat_id,
-            "❌ Watch ID must be a number."
+            "❌ Watch ID must be a number.\n\n"
+            "Example: /remove 2"
         )
 
         return
@@ -1181,11 +729,6 @@ def handle_remove(
 
     if deleted:
 
-        logger.info(
-            f"Watch #{watch_id} deleted by "
-            f"user #{user_id}"
-        )
-
         send_message(
             chat_id,
             f"🗑️ Watch #{watch_id} removed."
@@ -1195,8 +738,8 @@ def handle_remove(
 
         send_message(
             chat_id,
-            f"❌ I couldn't find watch #{watch_id} "
-            f"in your watchlist."
+            f"❌ I couldn't find watch "
+            f"#{watch_id} in your watchlist."
         )
 
 
@@ -1215,19 +758,19 @@ def handle_cancel(chat_id):
 
         send_message(
             chat_id,
-            "🛑 Cancelled."
+            "🦅 Operation cancelled."
         )
 
     else:
 
         send_message(
             chat_id,
-            "Nothing is currently in progress."
+            "Nothing to cancel."
         )
 
 
 # ==================================================
-# MAIN BOT LOOP
+# MAIN
 # ==================================================
 
 def main():
@@ -1235,7 +778,7 @@ def main():
     initialize_database()
 
     logger.info(
-        "🟢 Price Hawk bot started."
+        "🟢 Price Hawk is running."
     )
 
     offset = None
@@ -1246,209 +789,157 @@ def main():
 
             data = get_updates(offset)
 
+            if not data.get("ok"):
+
+                logger.error(
+                    f"Telegram error: {data}"
+                )
+
+                continue
+
+            for update in data["result"]:
+
+                offset = (
+                    update["update_id"] + 1
+                )
+
+                message = update.get(
+                    "message"
+                )
+
+                if not message:
+                    continue
+
+                chat = message["chat"]
+                chat_id = chat["id"]
+
+                first_name = chat.get(
+                    "first_name"
+                )
+
+                user_id = get_or_create_user(
+                    telegram_chat_id=chat_id,
+                    name=first_name,
+                )
+
+                text = message.get(
+                    "text",
+                    ""
+                ).strip()
+
+                logger.info(
+                    f"Received message from "
+                    f"user #{user_id}: {text}"
+                )
+
+                # ------------------------------------------
+                # ACTIVE CONVERSATION
+                # ------------------------------------------
+
+                state = pending_adds.get(
+                    chat_id
+                )
+
+                if state:
+
+                    if text == "/cancel":
+
+                        handle_cancel(
+                            chat_id
+                        )
+
+                        continue
+
+                    if state["stage"] == "url":
+
+                        handle_add_url(
+                            chat_id,
+                            user_id,
+                            text,
+                        )
+
+                        continue
+
+                    if state["stage"] == "target":
+
+                        handle_add_target(
+                            chat_id,
+                            user_id,
+                            text,
+                        )
+
+                        continue
+
+                # ------------------------------------------
+                # COMMANDS
+                # ------------------------------------------
+
+                if text == "/start":
+
+                    send_message(
+                        chat_id,
+                        "🦅 Price Hawk is alive!\n\n"
+                        "Use /help to see what I can do."
+                    )
+
+                elif text == "/help":
+
+                    send_help(chat_id)
+
+                elif text == "/add":
+
+                    start_add(chat_id)
+
+                elif text.startswith("/add "):
+
+                    handle_direct_watch(
+                        chat_id,
+                        user_id,
+                        text,
+                    )
+
+                elif text in (
+                    "/watches",
+                    "/list",
+                ):
+
+                    handle_watches(
+                        chat_id,
+                        user_id,
+                    )
+
+                elif text.startswith("/remove"):
+
+                    handle_remove(
+                        chat_id,
+                        user_id,
+                        text,
+                    )
+
+                elif text == "/cancel":
+
+                    handle_cancel(
+                        chat_id
+                    )
+
+                else:
+
+                    send_message(
+                        chat_id,
+                        "I don't know that command yet.\n\n"
+                        "Try /help."
+                    )
+
         except requests.RequestException:
 
             logger.exception(
-                "Telegram polling request failed"
+                "Telegram request failed"
             )
 
-            continue
+        except Exception:
 
-        if not data.get("ok"):
-
-            logger.error(
-                f"Telegram returned an error: "
-                f"{data}"
-            )
-
-            continue
-
-        for update in data["result"]:
-
-            offset = update["update_id"] + 1
-
-            message = update.get("message")
-
-            if not message:
-                continue
-
-            chat = message["chat"]
-            chat_id = chat["id"]
-
-            first_name = chat.get(
-                "first_name"
-            )
-
-            user_id = get_or_create_user(
-                telegram_chat_id=chat_id,
-                name=first_name,
-            )
-
-            text = message.get(
-                "text",
-                ""
-            ).strip()
-
-            if not text:
-                continue
-
-            logger.info(
-                f"Received message from "
-                f"user #{user_id}: {text}"
-            )
-
-            # --------------------------------------------------
-            # GLOBAL COMMANDS
-            # --------------------------------------------------
-
-            if text == "/start":
-
-                pending_adds.pop(
-                    chat_id,
-                    None,
-                )
-
-                send_message(
-                    chat_id,
-                    "🦅 Price Hawk is alive!\n\n"
-                    "I watch product prices and "
-                    "alert you when they hit your target.\n\n"
-                    "Use /help to see what I can do."
-                )
-
-                continue
-
-            if text == "/help":
-
-                send_help(chat_id)
-
-                continue
-
-            if text == "/cancel":
-
-                handle_cancel(chat_id)
-
-                continue
-
-            # --------------------------------------------------
-            # REMOVE
-            # --------------------------------------------------
-
-            if text.startswith("/remove"):
-
-                handle_remove(
-                    chat_id,
-                    user_id,
-                    text,
-                )
-
-                continue
-
-            # --------------------------------------------------
-            # LIST / WATCHES
-            # --------------------------------------------------
-
-            if text == "/list" or text == "/watches":
-
-                handle_list(
-                    chat_id,
-                    user_id,
-                )
-
-                continue
-
-            if text.startswith("/history"):
-
-                handle_history(
-                    chat_id,
-                    user_id,
-                    text,
-                )
-
-                continue
-
-            if text.startswith("/price"):
-
-                handle_price(
-                    chat_id,
-                    user_id,
-                    text,
-                )
-
-                continue
-
-            # --------------------------------------------------
-            # ADD / WATCH
-            # --------------------------------------------------
-
-            if text == "/add":
-
-                start_add(chat_id)
-
-                continue
-
-            if text.startswith("/add "):
-
-                handle_direct_watch(
-                    chat_id,
-                    user_id,
-                    text,
-                )
-
-                continue
-
-            if text.startswith("/watch"):
-
-                handle_direct_watch(
-                    chat_id,
-                    user_id,
-                    text,
-                )
-
-                continue
-
-            # --------------------------------------------------
-            # CONVERSATIONAL STATE
-            # --------------------------------------------------
-
-            pending = pending_adds.get(
-                chat_id
-            )
-
-            if pending:
-
-                stage = pending.get(
-                    "stage"
-                )
-
-                if stage == "url":
-
-                    handle_add_url(
-                        chat_id,
-                        user_id,
-                        text,
-                    )
-
-                    continue
-
-                if stage == "target":
-
-                    handle_add_target(
-                        chat_id,
-                        user_id,
-                        text,
-                    )
-
-                    continue
-
-            # --------------------------------------------------
-            # UNKNOWN COMMAND
-            # --------------------------------------------------
-
-            send_message(
-                chat_id,
-                "I don't know that command yet.\n\n"
-                "Try /help."
+            logger.exception(
+                "Unexpected error in main bot loop"
             )
 
 
