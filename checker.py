@@ -36,6 +36,11 @@ BOT_TOKEN = os.environ["TELEGRAM_BOT_TOKEN"]
 TELEGRAM_URL = f"https://api.telegram.org/bot{BOT_TOKEN}"
 
 
+# ==================================================
+# HELPERS
+# ==================================================
+
+
 def now():
     return datetime.now(timezone.utc)
 
@@ -53,6 +58,42 @@ def send_message(chat_id, text):
     response.raise_for_status()
 
     return response.json()
+
+
+# ==================================================
+# CHECK RESULT
+# ==================================================
+
+
+def make_success_result(
+    price,
+    currency,
+    available,
+    previous_price,
+):
+    return {
+        "success": True,
+        "price": price,
+        "currency": currency,
+        "available": available,
+        "previous_price": previous_price,
+    }
+
+
+def make_failure_result(
+    error_type,
+    message,
+):
+    return {
+        "success": False,
+        "error": error_type,
+        "message": message,
+    }
+
+
+# ==================================================
+# WATCH CHECK
+# ==================================================
 
 
 def check_watch(watch):
@@ -91,13 +132,20 @@ def check_watch(watch):
 
         else:
 
-            logger.warning(
-                f"Watch #{watch_id}: "
-                f"unsupported retailer "
+            message = (
+                f"Unsupported retailer "
                 f"'{retailer}'"
             )
 
-            return
+            logger.warning(
+                f"Watch #{watch_id}: "
+                f"{message}"
+            )
+
+            return make_failure_result(
+                error_type="unsupported_retailer",
+                message=message,
+            )
 
     except FlipkartBlockedError as error:
 
@@ -107,7 +155,10 @@ def check_watch(watch):
             f"{error}"
         )
 
-        return
+        return make_failure_result(
+            error_type="blocked",
+            message=str(error),
+        )
 
     except FlipkartProductNotFoundError as error:
 
@@ -117,7 +168,10 @@ def check_watch(watch):
             f"{error}"
         )
 
-        return
+        return make_failure_result(
+            error_type="product_not_found",
+            message=str(error),
+        )
 
     except FlipkartScraperError as error:
 
@@ -127,25 +181,38 @@ def check_watch(watch):
             f"{error}"
         )
 
-        return
+        return make_failure_result(
+            error_type="scraper_error",
+            message=str(error),
+        )
 
-    except Exception:
+    except Exception as error:
 
         logger.exception(
             f"Watch #{watch_id}: "
             f"unexpected scraper error"
         )
 
-        return
+        return make_failure_result(
+            error_type="unexpected_error",
+            message=str(error),
+        )
 
     if product is None:
 
-        logger.warning(
-            f"Watch #{watch_id}: "
-            f"scraper returned no product"
+        message = (
+            "Scraper returned no product."
         )
 
-        return
+        logger.warning(
+            f"Watch #{watch_id}: "
+            f"{message}"
+        )
+
+        return make_failure_result(
+            error_type="no_product",
+            message=message,
+        )
 
     # --------------------------------------------------
     # PRODUCT DATA
@@ -154,6 +221,8 @@ def check_watch(watch):
     new_price = product["price"]
     new_currency = product["currency"]
     new_available = product["available"]
+
+    previous_price = current_price
 
     checked_at = now()
     checked_at_iso = checked_at.isoformat()
@@ -261,8 +330,8 @@ def check_watch(watch):
             f"alert re-armed"
         )
 
-        # Keep the local state correct for
-        # the target-alert check below.
+        # Keep local state correct for the
+        # target-alert check below.
         alert_active = 1
 
     # --------------------------------------------------
@@ -274,7 +343,9 @@ def check_watch(watch):
         and alert_active
     ):
 
-        chat_id = get_telegram_chat_id(user_id)
+        chat_id = get_telegram_chat_id(
+            user_id
+        )
 
         if chat_id is None:
 
@@ -315,6 +386,22 @@ def check_watch(watch):
                     f"Telegram request failed"
                 )
 
+    # --------------------------------------------------
+    # RETURN RESULT
+    # --------------------------------------------------
+
+    return make_success_result(
+        price=new_price,
+        currency=new_currency,
+        available=new_available,
+        previous_price=previous_price,
+    )
+
+
+# ==================================================
+# CHECK ALL ACTIVE WATCHES
+# ==================================================
+
 
 def run_check_cycle():
     initialize_database()
@@ -339,6 +426,11 @@ def run_check_cycle():
                 f"Watch #{watch_id}: "
                 f"unexpected check error"
             )
+
+
+# ==================================================
+# ENTRY POINT
+# ==================================================
 
 
 if __name__ == "__main__":

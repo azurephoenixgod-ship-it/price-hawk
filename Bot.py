@@ -22,6 +22,7 @@ from retailers.flipkart import (
 
 from retry import scrape_with_retry
 from logger import get_logger
+from checker import check_watch
 
 
 # ==================================================
@@ -113,6 +114,9 @@ def send_help(chat_id):
 
         "/history <watch ID>\n"
         "Show price history.\n\n"
+
+        "/price <watch ID>\n"
+        "Check the latest price right now.\n\n"
 
         "/remove <watch ID>\n"
         "Remove one of your watches.\n\n"
@@ -884,6 +888,257 @@ def handle_history(
     )
 
 # ==================================================
+# MANUAL PRICE CHECK
+# ==================================================
+
+def handle_price(
+    chat_id,
+    user_id,
+    text,
+):
+    parts = text.split(maxsplit=1)
+
+    if len(parts) != 2:
+        send_message(
+            chat_id,
+            "Usage:\n"
+            "/price <watch ID>\n\n"
+            "Example:\n"
+            "/price 2"
+        )
+
+        return
+
+    try:
+        watch_id = int(parts[1])
+
+    except ValueError:
+        send_message(
+            chat_id,
+            "❌ Watch ID must be a number."
+        )
+
+        return
+
+    # --------------------------------------------------
+    # VERIFY OWNERSHIP
+    # --------------------------------------------------
+
+    watch = get_watch_for_user(
+        user_id=user_id,
+        watch_id=watch_id,
+    )
+
+    if watch is None:
+        send_message(
+            chat_id,
+            f"❌ I couldn't find watch #{watch_id} "
+            f"in your watchlist."
+        )
+
+        return
+
+    (
+        _watch_id,
+        retailer,
+        url,
+        product_name,
+        target_price,
+        current_price,
+        currency,
+        available,
+        alert_active,
+        last_checked,
+    ) = watch
+
+    # --------------------------------------------------
+    # START CHECK
+    # --------------------------------------------------
+
+    send_message(
+        chat_id,
+        "🔎 Checking the latest price..."
+    )
+
+    logger.info(
+        f"User #{user_id} requested manual "
+        f"price check for watch #{watch_id}"
+    )
+
+    # --------------------------------------------------
+    # RUN SHARED CHECKER
+    # --------------------------------------------------
+
+    try:    
+        
+
+        (
+            watch_id,
+            retailer,
+            url,
+            product_name,
+            target_price,
+            current_price,
+            currency,
+            available,
+            alert_active,
+            last_checked,
+        ) = watch
+
+        watch_for_checker = (
+            watch_id,
+            user_id,
+            retailer,
+            url,
+            None,
+            product_name,
+            target_price,
+            current_price,
+            currency,
+            available,
+            alert_active,
+            last_checked,
+        )
+
+        result = check_watch(watch_for_checker)
+
+    except Exception:
+
+        logger.exception(
+            f"Manual price check failed for "
+            f"watch #{watch_id}"
+        )
+
+        send_message(
+            chat_id,
+            "❌ Something went wrong while "
+            "checking that product."
+        )
+
+        return
+
+    except Exception:
+
+        logger.exception(
+            f"Manual price check failed for "
+            f"watch #{watch_id}"
+        )
+
+        send_message(
+            chat_id,
+            "❌ Something went wrong while "
+            "checking that product."
+        )
+
+        return
+
+    # --------------------------------------------------
+    # HANDLE FAILURE
+    # --------------------------------------------------
+
+    if not result["success"]:
+
+        error_type = result["error"]
+
+        if error_type == "blocked":
+
+            message = (
+                "⚠️ Flipkart blocked the request.\n\n"
+                "Try again later."
+            )
+
+        elif error_type == "product_not_found":
+
+            message = (
+                "❌ I couldn't find product "
+                "information on that page."
+            )
+
+        elif error_type in (
+            "scraper_error",
+            "no_product",
+        ):
+
+            message = (
+                "❌ I couldn't retrieve the "
+                "latest price.\n\n"
+                "Please try again later."
+            )
+
+        else:
+
+            message = (
+                "❌ I couldn't complete the "
+                "price check.\n\n"
+                "Please try again later."
+            )
+
+        send_message(
+            chat_id,
+            message
+        )
+
+        return
+
+    # --------------------------------------------------
+    # SUCCESS
+    # --------------------------------------------------
+
+    new_price = result["price"]
+    new_currency = result["currency"]
+    new_available = result["available"]
+    previous_price = result["previous_price"]
+
+    if previous_price is None:
+
+        price_change_text = (
+            "📊 First recorded price"
+        )
+
+    elif new_price < previous_price:
+
+        price_change_text = (
+            f"📉 Down from "
+            f"₹{previous_price:,.0f}"
+        )
+
+    elif new_price > previous_price:
+
+        price_change_text = (
+            f"📈 Up from "
+            f"₹{previous_price:,.0f}"
+        )
+
+    else:
+
+        price_change_text = (
+            "➡️ Price unchanged"
+        )
+
+    availability_text = (
+        "In stock"
+        if new_available
+        else "Currently unavailable"
+    )
+
+    target_status = (
+        "🎯 AT OR BELOW TARGET"
+        if new_price <= target_price
+        else "🎯 Above target"
+    )
+
+    send_message(
+        chat_id,
+        f"🦅 LATEST PRICE\n\n"
+        f"📦 {product_name}\n\n"
+        f"💰 Current: ₹{new_price:,.0f}\n"
+        f"{price_change_text}\n"
+        f"{target_status}\n"
+        f"📦 Availability: {availability_text}\n\n"
+        f"Your target: ₹{target_price:,.0f}"
+    )
+
+# ==================================================
 # REMOVE
 # ==================================================
 
@@ -1105,6 +1360,16 @@ def main():
             if text.startswith("/history"):
 
                 handle_history(
+                    chat_id,
+                    user_id,
+                    text,
+                )
+
+                continue
+
+            if text.startswith("/price"):
+
+                handle_price(
                     chat_id,
                     user_id,
                     text,

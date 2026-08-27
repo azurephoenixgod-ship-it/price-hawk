@@ -19,6 +19,8 @@ class FlipkartProductNotFoundError(FlipkartScraperError):
 
 
 def get_product(url):
+
+    
     with sync_playwright() as p:
 
         browser = None
