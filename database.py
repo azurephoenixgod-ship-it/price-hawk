@@ -112,6 +112,29 @@ def get_or_create_user(telegram_chat_id, name=None):
     return user_id
 
 
+def get_telegram_chat_id(user_id):
+    connection = get_connection()
+    cursor = connection.cursor()
+
+    cursor.execute(
+        """
+        SELECT telegram_chat_id
+        FROM users
+        WHERE id = ?
+        """,
+        (user_id,)
+    )
+
+    result = cursor.fetchone()
+
+    connection.close()
+
+    if result is None:
+        return None
+
+    return result[0]
+
+
 def create_watch(
     user_id,
     retailer,
@@ -125,6 +148,8 @@ def create_watch(
 ):
     connection = get_connection()
     cursor = connection.cursor()
+
+    timestamp = now()
 
     cursor.execute(
         """
@@ -153,8 +178,8 @@ def create_watch(
             current_price,
             currency,
             available,
-            now(),
-            now()
+            timestamp,
+            timestamp
         )
     )
 
@@ -245,6 +270,232 @@ def delete_watch(user_id, watch_id):
     connection.close()
 
     return deleted
+
+
+def get_all_active_watches():
+    connection = get_connection()
+    cursor = connection.cursor()
+
+    cursor.execute(
+        """
+        SELECT
+            id,
+            user_id,
+            retailer,
+            url,
+            product_id,
+            product_name,
+            target_price,
+            current_price,
+            currency,
+            available,
+            alert_active,
+            last_checked
+        FROM watches
+        ORDER BY id
+        """
+    )
+
+    watches = cursor.fetchall()
+
+    connection.close()
+
+    return watches
+
+
+def update_watch_price(
+    watch_id,
+    price,
+    currency,
+    available,
+    checked_at
+):
+    connection = get_connection()
+    cursor = connection.cursor()
+
+    cursor.execute(
+        """
+        UPDATE watches
+        SET
+            current_price = ?,
+            currency = ?,
+            available = ?,
+            last_checked = ?
+        WHERE id = ?
+        """,
+        (
+            price,
+            currency,
+            available,
+            checked_at,
+            watch_id
+        )
+    )
+
+    connection.commit()
+    connection.close()
+
+
+def set_alert_active(watch_id, active):
+    connection = get_connection()
+    cursor = connection.cursor()
+
+    cursor.execute(
+        """
+        UPDATE watches
+        SET alert_active = ?
+        WHERE id = ?
+        """,
+        (1 if active else 0, watch_id)
+    )
+
+    connection.commit()
+    connection.close()
+
+
+def get_latest_price_interval(watch_id):
+    connection = get_connection()
+    cursor = connection.cursor()
+
+    cursor.execute(
+        """
+        SELECT
+            id,
+            price,
+            started_at,
+            ended_at
+        FROM price_intervals
+        WHERE watch_id = ?
+        ORDER BY id DESC
+        LIMIT 1
+        """,
+        (watch_id,)
+    )
+
+    interval = cursor.fetchone()
+
+    connection.close()
+
+    return interval
+
+
+def create_price_interval(
+    watch_id,
+    price,
+    started_at
+):
+    connection = get_connection()
+    cursor = connection.cursor()
+
+    cursor.execute(
+        """
+        INSERT INTO price_intervals (
+            watch_id,
+            price,
+            started_at,
+            ended_at
+        )
+        VALUES (?, ?, ?, NULL)
+        """,
+        (
+            watch_id,
+            price,
+            started_at
+        )
+    )
+
+    connection.commit()
+    connection.close()
+
+
+def close_price_interval(
+    interval_id,
+    ended_at
+):
+    connection = get_connection()
+    cursor = connection.cursor()
+
+    cursor.execute(
+        """
+        UPDATE price_intervals
+        SET ended_at = ?
+        WHERE id = ?
+        """,
+        (
+            ended_at,
+            interval_id
+        )
+    )
+
+    connection.commit()
+    connection.close()
+
+
+def update_daily_summary(
+    watch_id,
+    date,
+    price
+):
+    connection = get_connection()
+    cursor = connection.cursor()
+
+    cursor.execute(
+        """
+        SELECT
+            lowest_price,
+            highest_price
+        FROM daily_summaries
+        WHERE watch_id = ? AND date = ?
+        """,
+        (watch_id, date)
+    )
+
+    summary = cursor.fetchone()
+
+    if summary is None:
+        cursor.execute(
+            """
+            INSERT INTO daily_summaries (
+                watch_id,
+                date,
+                lowest_price,
+                highest_price,
+                closing_price
+            )
+            VALUES (?, ?, ?, ?, ?)
+            """,
+            (
+                watch_id,
+                date,
+                price,
+                price,
+                price
+            )
+        )
+
+    else:
+        lowest_price, highest_price = summary
+
+        cursor.execute(
+            """
+            UPDATE daily_summaries
+            SET
+                lowest_price = ?,
+                highest_price = ?,
+                closing_price = ?
+            WHERE watch_id = ? AND date = ?
+            """,
+            (
+                min(lowest_price, price),
+                max(highest_price, price),
+                price,
+                watch_id,
+                date
+            )
+        )
+
+    connection.commit()
+    connection.close()
 
 
 if __name__ == "__main__":
