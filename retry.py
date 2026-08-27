@@ -2,12 +2,6 @@ import time
 
 from logger import get_logger
 
-from retailers.flipkart import (
-    FlipkartBlockedError,
-    FlipkartProductNotFoundError,
-    FlipkartScraperError,
-)
-
 
 logger = get_logger("retry")
 
@@ -17,6 +11,9 @@ def scrape_with_retry(
     url,
     attempts=3,
     delays=(0, 2, 5),
+    blocked_error=Exception,
+    product_not_found_error=Exception,
+    scraper_error=Exception,
 ):
     last_error = None
 
@@ -38,13 +35,17 @@ def scrape_with_retry(
         try:
             return scrape_function(url)
 
-        except FlipkartBlockedError:
+        except blocked_error:
+            # A retailer explicitly blocked us.
+            # Retrying is pointless.
             raise
 
-        except FlipkartProductNotFoundError:
+        except product_not_found_error:
+            # The page loaded, but product data wasn't found.
+            # Retrying won't necessarily help.
             raise
 
-        except FlipkartScraperError as error:
+        except scraper_error as error:
 
             last_error = error
 

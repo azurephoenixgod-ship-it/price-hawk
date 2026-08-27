@@ -16,12 +16,7 @@ from database import (
     update_daily_summary,
 )
 
-from retailers.flipkart import (
-    get_product,
-    FlipkartBlockedError,
-    FlipkartProductNotFoundError,
-    FlipkartScraperError,
-)
+from retailers import get_retailer
 
 from logger import get_logger
 from retry import scrape_with_retry
@@ -97,10 +92,11 @@ def make_failure_result(
 
 
 def check_watch(watch):
+
     (
         watch_id,
         user_id,
-        retailer,
+        retailer_name,
         url,
         product_id,
         product_name,
@@ -118,40 +114,54 @@ def check_watch(watch):
     )
 
     # --------------------------------------------------
+    # FIND RETAILER
+    # --------------------------------------------------
+
+    retailer = get_retailer(url)
+
+    if retailer is None:
+
+        message = (
+            f"Unsupported retailer for URL: "
+            f"{url}"
+        )
+
+        logger.warning(
+            f"Watch #{watch_id}: "
+            f"{message}"
+        )
+
+        return make_failure_result(
+            error_type="unsupported_retailer",
+            message=message,
+        )
+
+    logger.debug(
+        f"Watch #{watch_id}: "
+        f"using retailer '{retailer.name}'"
+    )
+
+    # --------------------------------------------------
     # SCRAPE
     # --------------------------------------------------
 
     try:
 
-        if retailer == "flipkart":
+        product = scrape_with_retry(
+            retailer.get_product,
+            url,
+            blocked_error=retailer.blocked_error,
+            product_not_found_error=(
+                retailer.product_not_found_error
+            ),
+            scraper_error=retailer.scraper_error,
+        )
 
-            product = scrape_with_retry(
-                get_product,
-                url,
-            )
-
-        else:
-
-            message = (
-                f"Unsupported retailer "
-                f"'{retailer}'"
-            )
-
-            logger.warning(
-                f"Watch #{watch_id}: "
-                f"{message}"
-            )
-
-            return make_failure_result(
-                error_type="unsupported_retailer",
-                message=message,
-            )
-
-    except FlipkartBlockedError as error:
+    except retailer.blocked_error as error:
 
         logger.warning(
             f"Watch #{watch_id}: "
-            f"Flipkart blocked the request: "
+            f"{retailer.name} blocked the request: "
             f"{error}"
         )
 
@@ -160,7 +170,7 @@ def check_watch(watch):
             message=str(error),
         )
 
-    except FlipkartProductNotFoundError as error:
+    except retailer.product_not_found_error as error:
 
         logger.warning(
             f"Watch #{watch_id}: "
@@ -173,11 +183,11 @@ def check_watch(watch):
             message=str(error),
         )
 
-    except FlipkartScraperError as error:
+    except retailer.scraper_error as error:
 
         logger.warning(
             f"Watch #{watch_id}: "
-            f"scraper failure: "
+            f"{retailer.name} scraper failure: "
             f"{error}"
         )
 
@@ -200,9 +210,7 @@ def check_watch(watch):
 
     if product is None:
 
-        message = (
-            "Scraper returned no product."
-        )
+        message = "Scraper returned no product."
 
         logger.warning(
             f"Watch #{watch_id}: "
@@ -330,8 +338,6 @@ def check_watch(watch):
             f"alert re-armed"
         )
 
-        # Keep local state correct for the
-        # target-alert check below.
         alert_active = 1
 
     # --------------------------------------------------
@@ -404,6 +410,7 @@ def check_watch(watch):
 
 
 def run_check_cycle():
+
     initialize_database()
 
     watches = get_all_active_watches()
