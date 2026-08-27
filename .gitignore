@@ -1,7 +1,21 @@
 __pycache__/
 *.pyc
+
+# Secrets
 .env
+
+# Local databases
 *.db
 *.sqlite
 *.sqlite3
+
+# Scraper/debug artifacts
 flipkart_page.html
+
+# Logs
+price_hawk.log
+price_hawk.log.*
+
+# Temporary files
+*.tmp
+*.bak
