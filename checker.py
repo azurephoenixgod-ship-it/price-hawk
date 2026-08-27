@@ -24,6 +24,7 @@ from retailers.flipkart import (
 )
 
 from logger import get_logger
+from retry import scrape_with_retry
 
 
 load_dotenv()
@@ -83,7 +84,10 @@ def check_watch(watch):
 
         if retailer == "flipkart":
 
-            product = get_product(url)
+            product = scrape_with_retry(
+                get_product,
+                url,
+            )
 
         else:
 
@@ -257,6 +261,8 @@ def check_watch(watch):
             f"alert re-armed"
         )
 
+        # Keep the local state correct for
+        # the target-alert check below.
         alert_active = 1
 
     # --------------------------------------------------
