@@ -378,6 +378,38 @@ def get_latest_price_interval(watch_id):
 
     return interval
 
+def get_price_history_for_user(user_id, watch_id, limit=50):
+    connection = get_connection()
+    cursor = connection.cursor()
+
+    cursor.execute(
+        """
+        SELECT
+            pi.id,
+            pi.price,
+            pi.started_at,
+            pi.ended_at
+        FROM price_intervals pi
+        INNER JOIN watches w
+            ON pi.watch_id = w.id
+        WHERE
+            pi.watch_id = ?
+            AND w.user_id = ?
+        ORDER BY pi.started_at DESC
+        LIMIT ?
+        """,
+        (
+            watch_id,
+            user_id,
+            limit,
+        )
+    )
+
+    history = cursor.fetchall()
+
+    connection.close()
+
+    return history
 
 def create_price_interval(
     watch_id,
