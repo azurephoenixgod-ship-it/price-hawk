@@ -197,6 +197,56 @@ def get_watches_for_user(user_id):
     return watches
 
 
+def get_watch_for_user(user_id, watch_id):
+    connection = get_connection()
+    cursor = connection.cursor()
+
+    cursor.execute(
+        """
+        SELECT
+            id,
+            retailer,
+            url,
+            product_name,
+            target_price,
+            current_price,
+            currency,
+            available,
+            alert_active,
+            last_checked
+        FROM watches
+        WHERE id = ? AND user_id = ?
+        """,
+        (watch_id, user_id)
+    )
+
+    watch = cursor.fetchone()
+
+    connection.close()
+
+    return watch
+
+
+def delete_watch(user_id, watch_id):
+    connection = get_connection()
+    cursor = connection.cursor()
+
+    cursor.execute(
+        """
+        DELETE FROM watches
+        WHERE id = ? AND user_id = ?
+        """,
+        (watch_id, user_id)
+    )
+
+    deleted = cursor.rowcount > 0
+
+    connection.commit()
+    connection.close()
+
+    return deleted
+
+
 if __name__ == "__main__":
     initialize_database()
     print("🟢 Price Hawk database initialized.")
