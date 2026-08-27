@@ -9,6 +9,10 @@ def get_connection():
     return sqlite3.connect(DB_NAME)
 
 
+def now():
+    return datetime.now(timezone.utc).isoformat()
+
+
 def initialize_database():
     connection = get_connection()
     cursor = connection.cursor()
@@ -67,6 +71,130 @@ def initialize_database():
 
     connection.commit()
     connection.close()
+
+
+def get_or_create_user(telegram_chat_id, name=None):
+    connection = get_connection()
+    cursor = connection.cursor()
+
+    cursor.execute(
+        """
+        SELECT id
+        FROM users
+        WHERE telegram_chat_id = ?
+        """,
+        (telegram_chat_id,)
+    )
+
+    user = cursor.fetchone()
+
+    if user:
+        connection.close()
+        return user[0]
+
+    cursor.execute(
+        """
+        INSERT INTO users (
+            telegram_chat_id,
+            name,
+            created_at
+        )
+        VALUES (?, ?, ?)
+        """,
+        (telegram_chat_id, name, now())
+    )
+
+    user_id = cursor.lastrowid
+
+    connection.commit()
+    connection.close()
+
+    return user_id
+
+
+def create_watch(
+    user_id,
+    retailer,
+    url,
+    target_price,
+    product_id=None,
+    product_name=None,
+    current_price=None,
+    currency=None,
+    available=None
+):
+    connection = get_connection()
+    cursor = connection.cursor()
+
+    cursor.execute(
+        """
+        INSERT INTO watches (
+            user_id,
+            retailer,
+            url,
+            product_id,
+            product_name,
+            target_price,
+            current_price,
+            currency,
+            available,
+            created_at,
+            last_checked
+        )
+        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+        """,
+        (
+            user_id,
+            retailer,
+            url,
+            product_id,
+            product_name,
+            target_price,
+            current_price,
+            currency,
+            available,
+            now(),
+            now()
+        )
+    )
+
+    watch_id = cursor.lastrowid
+
+    connection.commit()
+    connection.close()
+
+    return watch_id
+
+
+def get_watches_for_user(user_id):
+    connection = get_connection()
+    cursor = connection.cursor()
+
+    cursor.execute(
+        """
+        SELECT
+            id,
+            retailer,
+            url,
+            product_name,
+            target_price,
+            current_price,
+            currency,
+            available,
+            alert_active,
+            last_checked
+        FROM watches
+        WHERE user_id = ?
+        ORDER BY id
+        """,
+        (user_id,)
+    )
+
+    watches = cursor.fetchall()
+
+    connection.close()
+
+    return watches
 
 
 if __name__ == "__main__":
