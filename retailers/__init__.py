@@ -19,6 +19,17 @@ from .amazon import (
     AmazonScraperError,
 )
 
+from .myntra import (
+    get_product as myntra_get_product,
+    MyntraBlockedError,
+    MyntraProductNotFoundError,
+    MyntraScraperError,
+)
+
+
+# ==================================================
+# FLIPKART
+# ==================================================
 
 register_retailer(
     Retailer(
@@ -34,6 +45,10 @@ register_retailer(
 )
 
 
+# ==================================================
+# AMAZON
+# ==================================================
+
 register_retailer(
     Retailer(
         name="amazon",
@@ -44,5 +59,23 @@ register_retailer(
         blocked_error=AmazonBlockedError,
         product_not_found_error=AmazonProductNotFoundError,
         scraper_error=AmazonScraperError,
+    )
+)
+
+
+# ==================================================
+# MYNTRA
+# ==================================================
+
+register_retailer(
+    Retailer(
+        name="myntra",
+        domains=(
+            "myntra.com",
+        ),
+        get_product=myntra_get_product,
+        blocked_error=MyntraBlockedError,
+        product_not_found_error=MyntraProductNotFoundError,
+        scraper_error=MyntraScraperError,
     )
 )
